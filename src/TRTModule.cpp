@@ -245,7 +245,7 @@ std::vector<bbox_t> TRTModule::operator()(const cv::Mat &src) const {
 
     // run model
     cudaMemcpyAsync(device_buffer[input_idx], x.data, input_sz * sizeof(float), cudaMemcpyHostToDevice, stream);
-    context->enqueue(1, device_buffer, stream, nullptr);
+    context->enqueueV2(device_buffer, stream, nullptr);
     cudaMemcpyAsync(output_buffer, device_buffer[output_idx], output_sz * sizeof(float), cudaMemcpyDeviceToHost,
                     stream);
     cudaStreamSynchronize(stream);
