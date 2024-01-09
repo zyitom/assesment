@@ -7,6 +7,15 @@
 
 #include <opencv2/core.hpp>
 #include <NvInfer.h>
+#include <vector>
+#include <queue>
+#include <memory>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <future>
+#include <functional>
+#include <stdexcept>
 
 struct alignas(4) bbox_t {
     cv::Point2f pts[4]; // [pt0, pt1, pt2, pt3]
@@ -39,7 +48,7 @@ public:
     TRTModule(const std::string &onnx_file, const std::string &cache_file);
 
     ~TRTModule();
-
+    std::vector<std::vector<bbox_t>> operator()(const std::vector<cv::Mat> &src_batch) const;
     TRTModule(const TRTModule &) = delete;
 
     TRTModule operator=(const TRTModule &) = delete;

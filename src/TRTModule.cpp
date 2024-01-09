@@ -5,9 +5,19 @@
 
 #include "TRTModule.hpp"
 #include "Logger.hpp"
-#include "iostream"
-#include "TRTModule.hpp"
+#include"iostream"
 #include <fstream>
+#include <opencv2/flann/logger.h>
+#include <cuda.h>
+#include <cuda_runtime_api.h>
+#include <NvInfer.h>
+#include <NvOnnxParser.h>
+#include <fmt/format.h>
+#include <fmt/color.h>
+#include <opencv2/imgproc.hpp>
+#include <algorithm>
+#include <chrono>
+//计算总维度 funvidia
 
 static inline size_t get_dims_size(const nvinfer1::Dims &dims) {
     size_t sz = 1;
@@ -41,7 +51,7 @@ TRTModule::TRTModule(const std::string &onnx_file, const std::string &cache_file
         std::cout << "[INFO]: Caching the engine to file: " << cache_file << std::endl;
         cache_engine(cache_file);
     }
-    
+
 
     // 从 TensorRT 引擎获取输入和输出缓冲区的索引
     input_idx = engine->getBindingIndex("input");
@@ -69,15 +79,7 @@ TRTModule::TRTModule(const std::string &onnx_file, const std::string &cache_file
 
 
 
-#include </usr/include/opencv4/opencv2/flann/logger.h>
-#include <cuda.h>
-#include <cuda_runtime_api.h>
-#include <NvInfer.h>
-#include <NvOnnxParser.h>
-#include <fmt/format.h>
-#include <fmt/color.h>
-#include <opencv2/imgproc.hpp>
-#include <algorithm>  // 对于 std::max 和 std::min
+ // 对于 std::max 和 std::min
 
 #define TRT_ASSERT(expr)                                                      \
     do{                                                                       \
@@ -86,14 +88,8 @@ TRTModule::TRTModule(const std::string &onnx_file, const std::string &cache_file
             exit(-1);                                                         \
         }                                                                     \
     } while(0)
-//class Logger : public nvinfer1::ILogger {
-//public:
-//    void log(Severity severity, const char* msg) noexcept override {
-//        std::cout << msg << std::endl;
-//    }
-//} gLogger;
+
 using namespace nvinfer1;
-//using namespace sample;
 
 template <typename F, typename S, typename... Ts>
 S reduce(F function, S first, Ts... rest) {
@@ -145,6 +141,8 @@ constexpr float inv_sigmoid(float x) {
 constexpr float sigmoid(float x) {
     return 1 / (1 + std::exp(-x));
 }
+
+
 TRTModule::~TRTModule() {
     // 首先销毁执行上下文
     if (context) {
@@ -162,8 +160,6 @@ TRTModule::~TRTModule() {
         engine->destroy();
         engine = nullptr;
     }
-
-    // 清理其他资源...
 }
 
 
@@ -191,6 +187,8 @@ void TRTModule::build_engine_from_onnx(const std::string &onnx_file) {
     yolov5_output_topk->setName("output-topk");
     network->getInput(0)->setName("input");
     network->markOutput(*yolov5_output_topk);
+    #include <cuda_runtime_api.h> // Include the CUDA header file
+
     network->unmarkOutput(*yolov5_output);
     auto config = builder->createBuilderConfig();
     if (builder->platformHasFastFp16()) {
@@ -200,7 +198,7 @@ void TRTModule::build_engine_from_onnx(const std::string &onnx_file) {
         std::cout << "[INFO]: platform do not support fp16, enable fp32" << std::endl;
     }
     size_t free, total;
-    cuMemGetInfo(&free, &total);
+    cudaMemGetInfo(&free, &total); // Use cudaMemGetInfo instead of cuMemGetInfo
     std::cout << "[INFO]: total gpu mem: " << (total >> 20) << "MB, free gpu mem: " << (free >> 20) << "MB" << std::endl;
     std::cout << "[INFO]: max workspace size will use all of free gpu mem" << std::endl;
     config->setMaxWorkspaceSize(free);
@@ -232,23 +230,52 @@ void TRTModule::cache_engine(const std::string &cache_file) {
     ofs.write(static_cast<const char *>(engine_buffer->data()), engine_buffer->size());
     engine_buffer->destroy();
 }
+std::vector<std::vector<bbox_t>> TRTModule::operator()(const std::vector<cv::Mat> &src_batch) const {
+    std::vector<std::vector<bbox_t>> batch_results;
+    batch_results.reserve(src_batch.size());
+
+    // 对于每张图像
+    for (const auto& src : src_batch) {
+        // 调用现有的单图像处理逻辑
+        std::vector<bbox_t> result = this->operator()(src);
+        batch_results.push_back(result);
+    }
+
+    return batch_results;
+}
+#include <chrono> // 添加计时库
 
 std::vector<bbox_t> TRTModule::operator()(const cv::Mat &src) const {
-    // pre-process [bgr2rgb & resize]
+    auto start = std::chrono::high_resolution_clock::now(); // 开始计时
+
+    // 图像预处理
     cv::Mat x;
-    float fx = (float) src.cols / 640.f, fy = (float) src.rows / 384.f;
+    float fx = static_cast<float>(src.cols) / 640.f, fy = static_cast<float>(src.rows) / 384.f;
     cv::cvtColor(src, x, cv::COLOR_BGR2RGB);
     if (src.cols != 640 || src.rows != 384) {
-        cv::resize(x, x, {640, 384});
+        cv::resize(x, x, cv::Size(640, 384));
     }
     x.convertTo(x, CV_32F);
 
-    // run model
+    // 更新输入维度（如果需要）
+    nvinfer1::Dims inputDims = context->getBindingDimensions(input_idx);
+    inputDims.d[0] = 1; // 假设批量大小为1
+    context->setBindingDimensions(input_idx, inputDims);
+
+    // 复制数据到已分配的显存空间
     cudaMemcpyAsync(device_buffer[input_idx], x.data, input_sz * sizeof(float), cudaMemcpyHostToDevice, stream);
-    context->enqueueV2(device_buffer, stream, nullptr);
-    cudaMemcpyAsync(output_buffer, device_buffer[output_idx], output_sz * sizeof(float), cudaMemcpyDeviceToHost,
-                    stream);
+
+    // 使用enqueueV2而不是过时的enqueue
+    void* bindings[] = {device_buffer[input_idx], device_buffer[output_idx]};
+    context->enqueueV2(bindings, stream, nullptr);
+
+    // 从GPU复制输出数据到主机内存
+    cudaMemcpyAsync(output_buffer, device_buffer[output_idx], output_sz * sizeof(float), cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
+
+
+
+
      
     // post-process [nms]
     std::vector<bbox_t> rst;
@@ -272,6 +299,10 @@ std::vector<bbox_t> TRTModule::operator()(const cv::Mat &src) const {
             if (is_overlap(box_buffer, box2_buffer)) removed[j] = true;
         }
     }
+
+    auto end = std::chrono::high_resolution_clock::now(); // 结束计时
+    std::chrono::duration<double, std::milli> elapsed = end - start; // 计算耗时
+    std::cout << "Processing time: " << elapsed.count() << " ms" << std::endl;
 
     return rst;
 }
